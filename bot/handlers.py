@@ -66,8 +66,7 @@ async def handle_passport_photo(message: Message, state: FSMContext) -> None:
     passport_dir.mkdir(parents=True, exist_ok=True)
     file_name = f"passport_{message.from_user.id}_{photo.file_unique_id}.jpg"
     destination = passport_dir / file_name
-    file = await photo.get_file()
-    await message.bot.download(file, destination)
+    await message.bot.download(photo.file_id, destination)
     await state.update_data(passport_photo=str(destination))
     await state.set_state(ContractStates.waiting_for_manual_data)
     await message.answer(
