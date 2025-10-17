@@ -249,29 +249,39 @@ def _extract_issued_by(lines: List[str]) -> str | None:
 
 
 def _looks_like_new_field(line: str) -> bool:
-    lowered = line.lower()
-    if any(
-        keyword in lowered
-        for keyword in (
-            "серия",
-            "номер",
-            "дата",
-            "код подразделения",
-            "фамил",
-            "имя",
-            "отч",
-            "пол",
-            "место рождения",
-        )
-    ):
+    stripped = line.strip()
+    lowered = stripped.lower()
+    keyword_triggers = (
+        "серия",
+        "номер",
+        "дата",
+        "код подразделения",
+        "фамил",
+        "имя",
+        "отч",
+        "пол",
+        "место рождения",
+        "выдан",
+        "паспорт",
+        "фио",
+    )
+    if any(keyword in lowered for keyword in keyword_triggers):
         return True
 
-    if re.search(r"\d{2}[.\s]\d{2}[.\s]\d{4}", line):
+    if re.search(r"\d{2}[.\s]\d{2}[.\s]\d{4}", stripped):
         return True
 
-    digits = re.sub(r"\D", "", line)
-    if len(digits) >= 10:
+    digits_only = re.sub(r"\D", "", stripped)
+    if len(digits_only) >= 10:
         return True
+
+    if digits_only and len(digits_only) == 6:
+        if re.fullmatch(r"[\d\s\-–—]+", stripped):
+            return True
+
+    if 5 <= len(stripped) <= 8 and digits_only:
+        if re.fullmatch(r"[\d\s\-–—]+", stripped) and 4 <= len(digits_only) <= 6:
+            return True
 
     return False
 
