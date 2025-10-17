@@ -420,7 +420,16 @@ def _contains_digits(text: str) -> bool:
 
 
 def _is_name_word(word: str) -> bool:
-    return bool(re.fullmatch(r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?", word))
+    """Return True if the word looks like a valid name token.
+
+    The OCR sometimes returns name parts entirely in upper case (e.g. "ИВАНОВ"),
+    which previously failed the strict "capitalized" pattern.  We now allow
+    tokens that consist only of Cyrillic letters in any case while still
+    restricting the characters to avoid picking up unrelated words with digits
+    or punctuation.
+    """
+
+    return bool(re.fullmatch(r"[А-ЯЁа-яё]+(?:-[А-ЯЁа-яё]+)?", word))
 
 
 def _split_name_tokens(value: str) -> List[str]:
@@ -429,6 +438,8 @@ def _split_name_tokens(value: str) -> List[str]:
         if not _is_name_word(word):
             continue
         lowered = word.lower()
+        if lowered in {"фамилия", "имя", "отчество", "фио"}:
+            continue
         if any(stop in lowered for stop in ("россий", "федерац", "паспорт", "мвд")):
             continue
         tokens.append(word)
