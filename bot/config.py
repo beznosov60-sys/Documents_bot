@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-# Требуемые сторонние библиотеки: aiogram, jinja2, python-docx, reportlab, num2words, Babel, python-dateutil, aiofiles
+# Требуемые сторонние библиотеки: aiogram, jinja2, python-docx, reportlab, num2words, Babel, python-dateutil, aiofiles, easyocr, python-dotenv
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 
 @dataclass
@@ -18,9 +20,10 @@ class Config:
 
 
 def load_config() -> Config:
-    token = os.getenv("BOT_TOKEN")
+    load_dotenv()
+    token = os.getenv("BOT_TOKEN") or os.getenv("TOKEN_BOT")
     if not token:
-        raise RuntimeError("BOT_TOKEN environment variable is required")
+        raise RuntimeError("BOT_TOKEN (или TOKEN_BOT) environment variable is required")
 
     base_path = Path(__file__).resolve().parent.parent
     storage_path = base_path / "data"
