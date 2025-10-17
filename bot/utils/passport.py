@@ -262,10 +262,12 @@ def _looks_like_new_field(line: str) -> bool:
         "пол",
         "место рождения",
         "выдан",
-        "паспорт",
         "фио",
     )
     if any(keyword in lowered for keyword in keyword_triggers):
+        return True
+
+    if re.match(r"^паспорт(?:\b|[\s:,-])", lowered):
         return True
 
     if re.search(r"\d{2}[.\s]\d{2}[.\s]\d{4}", stripped):
