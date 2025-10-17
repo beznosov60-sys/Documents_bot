@@ -95,8 +95,48 @@ async def handle_manual_passport(message: Message, state: FSMContext) -> None:
         passport.photo_path = Path(photo_path)
 
     await state.update_data(passport=passport)
+
+    summary_lines = [
+        "Проверьте распознанные данные паспорта:",
+        f"ФИО: {passport.full_name}",
+        f"Серия и номер: {passport.series} {passport.number}",
+        f"Кем выдан: {passport.issued_by}",
+        f"Дата выдачи: {format_russian_date(passport.issued_date)}",
+    ]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Всё верно", callback_data="confirm_passport")
+    builder.button(text="Изменить", callback_data="reject_passport")
+    builder.adjust(2)
+
+    await message.answer("\n".join(summary_lines), reply_markup=builder.as_markup())
+    await state.set_state(ContractStates.passport_confirmation)
+
+
+@router.callback_query(ContractStates.passport_confirmation, F.data == "reject_passport")
+async def reject_passport(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_reply_markup()
+    data = await state.get_data()
+    data.pop("passport", None)
+    await state.set_data(data)
+    await state.set_state(ContractStates.waiting_for_manual_data)
+    await callback.message.answer(
+        "Хорошо, отправьте паспортные данные ещё раз в формате:\n"
+        "ФИО: Иванов Иван Иванович\n"
+        "Серия: 1234\n"
+        "Номер: 567890\n"
+        "Кем выдан: ОВД района\n"
+        "Дата выдачи: 01.01.2020"
+    )
+    await callback.answer()
+
+
+@router.callback_query(ContractStates.passport_confirmation, F.data == "confirm_passport")
+async def confirm_passport(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_reply_markup()
     await state.set_state(ContractStates.waiting_for_amount)
-    await message.answer("Введите сумму оплаты (например, 132000).")
+    await callback.message.answer("Данные паспорта подтверждены. Введите сумму оплаты (например, 132000).")
+    await callback.answer()
 
 
 def _clean_amount(text: str) -> Optional[int]:
