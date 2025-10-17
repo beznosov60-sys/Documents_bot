@@ -169,10 +169,59 @@ def _extract_series_number(text: str) -> tuple[str | None, str | None]:
 
 def _extract_issued_date(text: str) -> date | None:
     date_pattern = re.compile(r"(\d{2}[.\s]\d{2}[.\s]\d{4})")
-    match = date_pattern.search(text)
-    if not match:
-        return None
-    digits = re.findall(r"\d+", match.group(1))
+    keywords = ("дата выдачи", "выдан", "выдано", "выдана")
+
+    for keyword in keywords:
+        keyword_pattern = re.compile(
+            rf"{re.escape(keyword)}[^0-9]{{0,40}}(\d{{2}}[.\s]\d{{2}}[.\s]\d{{4}})",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        match = keyword_pattern.search(text)
+        if match:
+            parsed = _parse_date_string(match.group(1))
+            if parsed:
+                return parsed
+
+    for keyword in keywords:
+        keyword_pattern = re.compile(
+            rf"(\d{{2}}[.\s]\d{{2}}[.\s]\d{{4}})[^0-9]{{0,40}}{re.escape(keyword)}",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        match = keyword_pattern.search(text)
+        if match:
+            parsed = _parse_date_string(match.group(1))
+            if parsed:
+                return parsed
+
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in keywords):
+            neighbourhood = [line]
+            if idx + 1 < len(lines):
+                neighbourhood.append(lines[idx + 1])
+            if idx > 0:
+                neighbourhood.append(lines[idx - 1])
+            combined = " ".join(neighbourhood)
+            match = date_pattern.search(combined)
+            if match:
+                parsed = _parse_date_string(match.group(1))
+                if parsed:
+                    return parsed
+
+    matches: list[date] = []
+    for raw in date_pattern.findall(text):
+        parsed = _parse_date_string(raw)
+        if parsed:
+            matches.append(parsed)
+    unique_matches = set(matches)
+    if len(unique_matches) == 1:
+        return matches[0]
+    return None
+
+
+def _parse_date_string(value: str) -> date | None:
+    digits = re.findall(r"\d+", value)
     if len(digits) != 3:
         return None
     normalized = f"{int(digits[0]):02d}.{int(digits[1]):02d}.{int(digits[2]):04d}"
