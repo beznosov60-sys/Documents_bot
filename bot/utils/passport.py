@@ -237,7 +237,7 @@ def _extract_issued_by(lines: List[str]) -> str | None:
         if any(keyword in lowered for keyword in ("выдан", "овд", "уфмс", "мвд", "отдел")):
             collected = [line]
             for tail in lines[idx + 1 : idx + 4]:
-                if any(char.isdigit() for char in tail):
+                if _looks_like_new_field(tail):
                     break
                 collected.append(tail)
             cleaned = " ".join(collected)
@@ -246,6 +246,34 @@ def _extract_issued_by(lines: List[str]) -> str | None:
             if cleaned:
                 return _normalize_title_phrase(cleaned)
     return None
+
+
+def _looks_like_new_field(line: str) -> bool:
+    lowered = line.lower()
+    if any(
+        keyword in lowered
+        for keyword in (
+            "серия",
+            "номер",
+            "дата",
+            "код подразделения",
+            "фамил",
+            "имя",
+            "отч",
+            "пол",
+            "место рождения",
+        )
+    ):
+        return True
+
+    if re.search(r"\d{2}[.\s]\d{2}[.\s]\d{4}", line):
+        return True
+
+    digits = re.sub(r"\D", "", line)
+    if len(digits) >= 10:
+        return True
+
+    return False
 
 
 def _extract_after_keyword(lines: List[str], keywords: Iterable[str]) -> str | None:
