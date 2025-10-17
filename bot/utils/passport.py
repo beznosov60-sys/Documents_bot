@@ -5,7 +5,7 @@ import re
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Any, Dict, Iterable, List
 
 from dateutil import parser
 
@@ -71,7 +71,7 @@ def parse_passport_text(raw_text: str) -> PassportData:
     )
 
 
-def recognize_passport_image(image_path: Path) -> PassportData:
+def recognize_passport_image(image_path: Path) -> tuple[PassportData | None, Dict[str, Any]]:
     reader = _get_ocr_reader()
     logger.debug("Running OCR for passport image %s", image_path)
 
@@ -86,7 +86,25 @@ def recognize_passport_image(image_path: Path) -> PassportData:
 
     logger.debug("OCR lines: %s", lines)
 
-    return _build_passport_from_lines(lines)
+    result = _build_passport_from_lines(lines)
+
+    passport: PassportData | None = None
+    values = result.get("values", {})
+    if all(key in values for key in ("full_name", "series", "number", "issued_by", "issued_date")):
+        passport = PassportData(
+            full_name=values["full_name"],
+            series=values["series"],
+            number=values["number"],
+            issued_by=values["issued_by"],
+            issued_date=values["issued_date"],
+        )
+
+    if not result.get("recognized_fields"):
+        raise PassportRecognitionError(
+            "Не удалось распознать ни одного поля паспорта"
+        )
+
+    return passport, result
 
 
 @lru_cache(maxsize=1)
@@ -101,58 +119,125 @@ def _get_ocr_reader() -> "easyocr.Reader":
     return easyocr.Reader(["ru", "en"], gpu=False)
 
 
-def _build_passport_from_lines(lines: List[str]) -> PassportData:
+def _build_passport_from_lines(lines: List[str]) -> Dict[str, Any]:
     text = "\n".join(lines)
 
-    full_name = _extract_full_name(lines, text)
+    result: Dict[str, Any] = {
+        "values": {},
+        "recognized_fields": [],
+        "missing_fields": [],
+        "warnings": [],
+    }
+
+    values: Dict[str, Any] = result["values"]
+
+    full_name, missing_name_parts = _extract_full_name(lines, text)
+    if full_name:
+        values["full_name"] = full_name
+        result["recognized_fields"].append("ФИО")
+        if missing_name_parts:
+            result["warnings"].append(
+                "ФИО распознано не полностью: отсутствует "
+                + ", ".join(missing_name_parts)
+            )
+    else:
+        result["missing_fields"].append("ФИО")
+
     series, number = _extract_series_number(text)
-    issued_date = _extract_issued_date(text)
+    if series:
+        values["series"] = series
+        result["recognized_fields"].append("серия")
+    else:
+        result["missing_fields"].append("серия")
+
+    if number:
+        values["number"] = number
+        result["recognized_fields"].append("номер")
+    else:
+        result["missing_fields"].append("номер")
+
     issued_by = _extract_issued_by(lines)
+    if issued_by:
+        values["issued_by"] = issued_by
+        result["recognized_fields"].append("кем выдан")
+    else:
+        result["missing_fields"].append("кем выдан")
 
-    missing_fields = []
-    if not full_name:
-        missing_fields.append("ФИО")
-    if not series or not number:
-        missing_fields.append("серия и номер")
-    if not issued_by:
-        missing_fields.append("кем выдан")
-    if not issued_date:
-        missing_fields.append("дата выдачи")
+    issued_date = _extract_issued_date(text)
+    if issued_date:
+        values["issued_date"] = issued_date
+        result["recognized_fields"].append("дата выдачи")
+    else:
+        result["missing_fields"].append("дата выдачи")
 
-    if missing_fields:
-        raise PassportRecognitionError(
-            "Не удалось распознать поля: " + ", ".join(missing_fields)
-        )
+    division_code = _extract_division_code(text)
+    if division_code:
+        values["division_code"] = division_code
+        result["recognized_fields"].append("код подразделения")
 
-    return PassportData(
-        full_name=full_name,
-        series=series,
-        number=number,
-        issued_by=issued_by,
-        issued_date=issued_date,
-    )
+    required_fields = {"ФИО", "серия", "номер", "кем выдан", "дата выдачи"}
+    result["missing_fields"] = [
+        field for field in result["missing_fields"] if field in required_fields
+    ]
+
+    result["recognized_fields"] = list(dict.fromkeys(result["recognized_fields"]))
+    result["missing_fields"] = list(dict.fromkeys(result["missing_fields"]))
+
+    return result
 
 
-def _extract_full_name(lines: List[str], text: str) -> str | None:
+def _extract_full_name(lines: List[str], text: str) -> tuple[str | None, List[str]]:
     last = _extract_after_keyword(lines, ("фамил",))
     first = _extract_after_keyword(lines, ("имя",))
     middle = _extract_after_keyword(lines, ("отч",))
 
-    if last and first:
-        parts = [_normalize_name_word(last), _normalize_name_word(first)]
-        if middle:
-            parts.append(_normalize_name_word(middle))
-        return " ".join(parts)
+    name_parts: List[str] = []
+    if last:
+        tokens = _split_name_tokens(last)
+        if tokens:
+            name_parts.append(_normalize_name_word(tokens[0]))
+    if first:
+        tokens = _split_name_tokens(first)
+        if tokens:
+            name_parts.append(_normalize_name_word(tokens[0]))
+            if not middle and len(tokens) > 1:
+                name_parts.append(_normalize_name_word(tokens[1]))
+    if middle:
+        tokens = _split_name_tokens(middle)
+        if tokens:
+            name_parts.append(_normalize_name_word(tokens[0]))
 
-    name_pattern = re.compile(r"\b[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2}\b")
-    for match in name_pattern.finditer(text):
-        candidate = match.group().strip()
-        if any(stop in candidate.lower() for stop in ("российск", "федерац", "паспорт")):
+    if len(name_parts) >= 2:
+        if len(name_parts) >= 3:
+            return " ".join(name_parts[:3]), []
+        return " ".join(name_parts[:2]), ["отчество"]
+
+    normalized_text = " ".join(line.strip() for line in lines if line.strip())
+    name_pattern = re.compile(r"[А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+")
+    matches = name_pattern.findall(normalized_text)
+    for candidate in matches:
+        lowered = candidate.lower()
+        if any(stop in lowered for stop in ("российск", "федерац", "паспорт")):
             continue
-        words = candidate.split()
-        if 2 <= len(words) <= 3:
-            return " ".join(_normalize_name_word(word) for word in words)
-    return None
+        words = [
+            _normalize_name_word(word)
+            for word in candidate.split()
+            if _is_name_word(word)
+        ]
+        if len(words) == 3:
+            return " ".join(words), []
+
+    sequential = _collect_name_sequence(lines)
+    if sequential:
+        if len(sequential) == 3:
+            return " ".join(_normalize_name_word(word) for word in sequential), []
+        if len(sequential) == 2:
+            return (
+                " ".join(_normalize_name_word(word) for word in sequential),
+                ["отчество"],
+            )
+
+    return None, []
 
 
 def _extract_series_number(text: str) -> tuple[str | None, str | None]:
@@ -277,15 +362,21 @@ def _looks_like_new_field(line: str) -> bool:
     if len(digits_only) >= 10:
         return True
 
-    if digits_only and len(digits_only) == 6:
-        if re.fullmatch(r"[\d\s\-–—]+", stripped):
-            return True
-
-    if 5 <= len(stripped) <= 8 and digits_only:
-        if re.fullmatch(r"[\d\s\-–—]+", stripped) and 4 <= len(digits_only) <= 6:
-            return True
+    if re.fullmatch(r"\d{3}\s*[-–—]\s*\d{3}", stripped):
+        return True
 
     return False
+
+
+def _extract_division_code(text: str) -> str | None:
+    pattern = re.compile(r"\b\d{3}\s*[-–—]\s*\d{3}\b")
+    match = pattern.search(text.replace("\n", " "))
+    if not match:
+        return None
+    digits = re.sub(r"\D", "", match.group())
+    if len(digits) != 6:
+        return None
+    return f"{digits[:3]}-{digits[3:]}"
 
 
 def _extract_after_keyword(lines: List[str], keywords: Iterable[str]) -> str | None:
@@ -326,3 +417,46 @@ def _normalize_title_phrase(text: str) -> str:
 
 def _contains_digits(text: str) -> bool:
     return any(char.isdigit() for char in text)
+
+
+def _is_name_word(word: str) -> bool:
+    return bool(re.fullmatch(r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?", word))
+
+
+def _split_name_tokens(value: str) -> List[str]:
+    tokens: List[str] = []
+    for word in value.split():
+        if not _is_name_word(word):
+            continue
+        lowered = word.lower()
+        if any(stop in lowered for stop in ("россий", "федерац", "паспорт", "мвд")):
+            continue
+        tokens.append(word)
+    return tokens
+
+
+def _collect_name_sequence(lines: List[str]) -> List[str]:
+    best: List[str] = []
+    current: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or _contains_digits(stripped):
+            current = []
+            continue
+        tokens = _split_name_tokens(stripped)
+        if not tokens:
+            current = []
+            continue
+        if len(tokens) >= 3:
+            return tokens[:3]
+        if len(tokens) == 2:
+            current = tokens[:]
+        else:
+            current.append(tokens[0])
+        if len(current) > 3:
+            current = current[-3:]
+        if len(current) > len(best):
+            best = current[:]
+        if len(best) == 3:
+            break
+    return best
