@@ -4,7 +4,7 @@ import asyncio
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
@@ -83,6 +83,59 @@ async def present_passport_summary(message: Message, state: FSMContext, passport
     await state.set_state(ContractStates.passport_confirmation)
 
 
+async def send_ocr_result(message: Message, result_dict: dict[str, Any]) -> None:
+    values = result_dict.get("values", {})
+    missing_fields = result_dict.get("missing_fields", [])
+    warnings = result_dict.get("warnings", [])
+
+    def _format_series(value: str | None) -> str:
+        if not value:
+            return ""
+        if len(value) == 4:
+            return f"{value[:2]} {value[2:]}"
+        return value
+
+    def _format_number(value: str | None) -> str:
+        if not value:
+            return ""
+        return value
+
+    def _format_date_value(value: Any) -> str:
+        if isinstance(value, date):
+            return value.strftime("%d.%m.%Y")
+        return str(value)
+
+    lines = ["📄 Результаты распознавания паспорта:"]
+
+    full_name = values.get("full_name")
+    lines.append(f"ФИО: {full_name if full_name else '❌ не найдено'}")
+
+    series_value = _format_series(values.get("series"))
+    lines.append(f"Серия: {series_value if series_value else '❌ не найдено'}")
+
+    number_value = _format_number(values.get("number"))
+    lines.append(f"Номер: {number_value if number_value else '❌ не найдено'}")
+
+    issued_by = values.get("issued_by")
+    lines.append(f"Кем выдан: {issued_by if issued_by else '❌ не найдено'}")
+
+    division_code = values.get("division_code")
+    lines.append(
+        f"Код подразделения: {division_code if division_code else '❌ не найдено'}"
+    )
+
+    issued_date_value = values.get("issued_date")
+    date_text = _format_date_value(issued_date_value) if issued_date_value else None
+    lines.append(f"Дата выдачи: {date_text if date_text else '❌ не найдено'}")
+
+    if missing_fields or warnings:
+        lines.append("⚠️ Распознан частично, проверьте данные.")
+    for warning in warnings:
+        lines.append(f"• {warning}")
+
+    await message.answer("\n".join(lines))
+
+
 @router.message(ContractStates.waiting_for_passport, F.photo)
 async def handle_passport_photo(message: Message, state: FSMContext) -> None:
     config = get_config(message)
@@ -98,7 +151,9 @@ async def handle_passport_photo(message: Message, state: FSMContext) -> None:
 
     loop = asyncio.get_running_loop()
     try:
-        passport = await loop.run_in_executor(None, recognize_passport_image, destination)
+        passport, ocr_result = await loop.run_in_executor(
+            None, recognize_passport_image, destination
+        )
     except PassportRecognitionError as exc:
         logger.warning("Passport OCR failed: %s", exc)
         await state.set_state(ContractStates.waiting_for_manual_data)
@@ -114,8 +169,32 @@ async def handle_passport_photo(message: Message, state: FSMContext) -> None:
         )
         return
 
-    passport.photo_path = destination
-    await present_passport_summary(message, state, passport)
+    await send_ocr_result(message, ocr_result)
+
+    recognized_fields = ocr_result.get("recognized_fields", [])
+    missing_fields = ocr_result.get("missing_fields", [])
+
+    if passport:
+        logger.info(
+            "Passport OCR success: распознаны поля: %s",
+            ", ".join(recognized_fields) if recognized_fields else "нет",
+        )
+        passport.photo_path = destination
+        await present_passport_summary(message, state, passport)
+        return
+
+    if missing_fields:
+        logger.warning(
+            "Passport OCR partial: не удалось распознать: %s",
+            ", ".join(missing_fields),
+        )
+    else:
+        logger.warning("Passport OCR partial: не удалось распознать обязательные поля")
+
+    await state.set_state(ContractStates.waiting_for_manual_data)
+    await message.answer(
+        "Не удалось распознать все необходимые данные. Введите их вручную по образцу или повторите фото."
+    )
 
 
 @router.message(ContractStates.waiting_for_passport)
