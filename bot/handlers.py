@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date
 from pathlib import Path
@@ -20,7 +21,11 @@ from bot.states import ContractStates
 from bot.utils.counter import build_contract_number, load_and_increment
 from bot.utils.documents import generate_documents
 from bot.utils.formatting import format_russian_date
-from bot.utils.passport import parse_passport_text
+from bot.utils.passport import (
+    PassportRecognitionError,
+    parse_passport_text,
+    recognize_passport_image,
+)
 from bot.utils.registry import get_last_contract, update_user_contract
 from bot.utils.schedule import build_payment_schedule
 
@@ -37,7 +42,7 @@ def get_config(event) -> Config:
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "Здравствуйте! Пришлите, пожалуйста, фотографию или скан паспорта.\n"
+        "Здравствуйте! Пришлите фотографию или скан паспорта — я постараюсь распознать данные автоматически.\n"
         "Если хотите ввести данные вручную, отправьте команду /manual."
     )
     await state.set_state(ContractStates.waiting_for_passport)
@@ -58,6 +63,26 @@ async def cmd_manual(message: Message, state: FSMContext) -> None:
     )
 
 
+async def present_passport_summary(message: Message, state: FSMContext, passport: PassportData) -> None:
+    await state.update_data(passport=passport)
+
+    summary_lines = [
+        "Проверьте распознанные данные паспорта:",
+        f"ФИО: {passport.full_name}",
+        f"Серия и номер: {passport.series} {passport.number}",
+        f"Кем выдан: {passport.issued_by}",
+        f"Дата выдачи: {format_russian_date(passport.issued_date)}",
+    ]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Всё верно", callback_data="confirm_passport")
+    builder.button(text="Изменить", callback_data="reject_passport")
+    builder.adjust(2)
+
+    await message.answer("\n".join(summary_lines), reply_markup=builder.as_markup())
+    await state.set_state(ContractStates.passport_confirmation)
+
+
 @router.message(ContractStates.waiting_for_passport, F.photo)
 async def handle_passport_photo(message: Message, state: FSMContext) -> None:
     config = get_config(message)
@@ -68,10 +93,29 @@ async def handle_passport_photo(message: Message, state: FSMContext) -> None:
     destination = passport_dir / file_name
     await message.bot.download(photo.file_id, destination)
     await state.update_data(passport_photo=str(destination))
-    await state.set_state(ContractStates.waiting_for_manual_data)
-    await message.answer(
-        "Фото получено. Теперь введите паспортные данные вручную, чтобы я мог сформировать договор."
-    )
+
+    await message.answer("Фото получено. Распознаю данные паспорта, пожалуйста, подождите…")
+
+    loop = asyncio.get_running_loop()
+    try:
+        passport = await loop.run_in_executor(None, recognize_passport_image, destination)
+    except PassportRecognitionError as exc:
+        logger.warning("Passport OCR failed: %s", exc)
+        await state.set_state(ContractStates.waiting_for_manual_data)
+        await message.answer(
+            "Не удалось распознать паспорт автоматически. Введите данные вручную по образцу или повторите фото."
+        )
+        return
+    except Exception as exc:  # pragma: no cover - unexpected errors
+        logger.exception("Unexpected error while processing passport", exc_info=exc)
+        await state.set_state(ContractStates.waiting_for_manual_data)
+        await message.answer(
+            "Произошла ошибка при распознавании паспорта. Попробуйте снова или введите данные вручную."
+        )
+        return
+
+    passport.photo_path = destination
+    await present_passport_summary(message, state, passport)
 
 
 @router.message(ContractStates.waiting_for_passport)
@@ -94,23 +138,7 @@ async def handle_manual_passport(message: Message, state: FSMContext) -> None:
     if photo_path:
         passport.photo_path = Path(photo_path)
 
-    await state.update_data(passport=passport)
-
-    summary_lines = [
-        "Проверьте распознанные данные паспорта:",
-        f"ФИО: {passport.full_name}",
-        f"Серия и номер: {passport.series} {passport.number}",
-        f"Кем выдан: {passport.issued_by}",
-        f"Дата выдачи: {format_russian_date(passport.issued_date)}",
-    ]
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Всё верно", callback_data="confirm_passport")
-    builder.button(text="Изменить", callback_data="reject_passport")
-    builder.adjust(2)
-
-    await message.answer("\n".join(summary_lines), reply_markup=builder.as_markup())
-    await state.set_state(ContractStates.passport_confirmation)
+    await present_passport_summary(message, state, passport)
 
 
 @router.callback_query(ContractStates.passport_confirmation, F.data == "reject_passport")
