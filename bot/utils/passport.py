@@ -424,12 +424,14 @@ def _is_name_word(word: str) -> bool:
 
     The OCR sometimes returns name parts entirely in upper case (e.g. "ИВАНОВ"),
     which previously failed the strict "capitalized" pattern.  We now allow
-    tokens that consist only of Cyrillic letters in any case while still
-    restricting the characters to avoid picking up unrelated words with digits
-    or punctuation.
+    either capitalized tokens ("Иванов") or all-uppercase tokens ("ИВАНОВ"),
+    while still restricting the characters to avoid picking up unrelated words
+    with digits or punctuation.  Lowercase-only tokens are rejected to avoid
+    matching common phrases.
     """
 
-    return bool(re.fullmatch(r"[А-ЯЁа-яё]+(?:-[А-ЯЁа-яё]+)?", word))
+    pattern = r"(?:[А-ЯЁ][а-яё]+|[А-ЯЁ]{2,})(?:-(?:[А-ЯЁ][а-яё]+|[А-ЯЁ]{2,}))?"
+    return bool(re.fullmatch(pattern, word))
 
 
 def _split_name_tokens(value: str) -> List[str]:
