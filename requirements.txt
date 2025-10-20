@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 aiogram
 python-dotenv
 opencv-python
@@ -5,3 +6,18 @@ pillow
 pytesseract
 natasha
 regex
+=======
+aiogram==3.4.1
+jinja2==3.1.4
+python-docx==1.1.0
+reportlab==4.2.2
+docxcompose==1.4.0
+num2words==0.5.13
+Babel==2.15.0
+python-dateutil==2.9.0
+aiofiles==23.2.1
+natasha==1.6.0
+opencv-python==4.10.0.84
+paddleocr==2.7.0.3
+python-dotenv==1.0.1
+>>>>>>> 473f7457858b85786ce938448b3357b52470b944
