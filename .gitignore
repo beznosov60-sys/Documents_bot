@@ -3,3 +3,12 @@ __pycache__/
 .env
 contracts/
 data/
+.venv/
+__pycache__/
+*.pyc
+.env
+*.jpg
+*.png
+*.pdf
+archive/
+uploads/
