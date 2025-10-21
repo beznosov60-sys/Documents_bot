@@ -3,9 +3,10 @@ import re
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import cv2
+import numpy as np
 from natasha import DatesExtractor, NamesExtractor
 from paddleocr import PaddleOCR
 from dateutil import parser
@@ -77,11 +78,13 @@ def parse_passport_text(raw_text: str) -> PassportData:
 
 def recognize_passport_image(
     image_path: Path,
-) -> Tuple[PassportData | None, Dict[str, str | None]]:
-    """Run OCR recognition for the provided passport image."""
+    *,
+    return_debug: bool = False,
+) -> Tuple[PassportData | None, Dict[str, Any]]:
+    """Run OCR recognition for the provided passport image using PaddleOCR."""
 
     reader = _get_ocr_reader()
-    preprocessed = _preprocess_image(image_path)
+    preprocessed, debug_path = _preprocess_image(image_path, save_debug=return_debug)
     logger.debug("Running PaddleOCR for passport image %s", image_path)
 
     try:
@@ -105,14 +108,33 @@ def recognize_passport_image(
     issued_date_str, issued_date_obj = _extract_issued_date(text)
     division_code = _extract_division_code(text)
 
-    result = {
+    result: Dict[str, Any] = {
         "ФИО": full_name,
         "Серия": series,
         "Номер": number,
         "Кем выдан": issued_by,
         "Дата": issued_date_str,
         "Код подразделения": division_code,
+        "raw_text": text,
+        "raw_lines": normalized_lines,
+        "blocks": {
+            "personal": {
+                "full_name": full_name,
+            },
+            "document_numbers": {
+                "series": series,
+                "number": number,
+            },
+            "issue": {
+                "issued_by": issued_by,
+                "issued_date": issued_date_str,
+                "division_code": division_code,
+            },
+        },
     }
+
+    if debug_path is not None:
+        result["debug_image"] = debug_path
 
     passport: PassportData | None = None
     if all([full_name, series, number, issued_by, issued_date_obj]):
@@ -147,17 +169,54 @@ def _get_dates_extractor() -> DatesExtractor:
     return DatesExtractor()
 
 
-def _preprocess_image(image_path: Path) -> "cv2.Mat":
+def _preprocess_image(image_path: Path, save_debug: bool = False) -> Tuple["cv2.Mat", Path | None]:
     image = cv2.imread(str(image_path))
     if image is None:
         raise PassportRecognitionError("Не удалось открыть изображение паспорта")
 
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(
-        blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    l_channel = clahe.apply(l_channel)
+    enhanced = cv2.cvtColor(cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+
+    # подавление бликов и переотражений
+    _, glare_mask = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
+    if np.count_nonzero(glare_mask) > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        glare_mask = cv2.dilate(glare_mask, kernel, iterations=1)
+        enhanced = cv2.inpaint(enhanced, glare_mask, 5, cv2.INPAINT_TELEA)
+        gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+        logger.debug("Glare suppressed for %s", image_path)
+
+    denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+    normalized = cv2.normalize(denoised, None, 0, 255, cv2.NORM_MINMAX)
+
+    adaptive = cv2.adaptiveThreshold(
+        normalized,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        10,
     )
-    return cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+    closed = cv2.morphologyEx(
+        adaptive,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1,
+    )
+
+    preprocessed = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
+
+    debug_path: Path | None = None
+    if save_debug:
+        debug_path = image_path.with_name(f"{image_path.stem}_preprocessed.png")
+        cv2.imwrite(str(debug_path), preprocessed)
+
+    return preprocessed, debug_path
 
 
 def _extract_text_lines(ocr_pages: Sequence[Sequence[Sequence[object]]]) -> List[str]:
@@ -190,6 +249,14 @@ def _extract_full_name(text: str) -> str | None:
         ]
         if cleaned:
             return " ".join(cleaned)
+
+    caps = re.findall(r"\b[А-ЯЁ]{3,}\b", text)
+    if len(caps) >= 2:
+        fam = caps[0].title()
+        first = caps[1].title() if len(caps) > 1 else ""
+        middle = caps[2].title() if len(caps) > 2 else ""
+        return " ".join([x for x in [fam, first, middle] if x])
+
     return None
 
 
@@ -358,4 +425,3 @@ __all__ = [
     "parse_passport_text",
     "recognize_passport_image",
 ]
-
