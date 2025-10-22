@@ -8,13 +8,21 @@ from typing import Any, Dict, List, Sequence, Tuple
 import cv2
 import numpy as np
 from natasha import DatesExtractor, NamesExtractor
-from paddleocr import PaddleOCR
 from dateutil import parser
 
 from bot.models import PassportData
 
 
 logger = logging.getLogger(__name__)
+
+try:
+    from paddleocr import PaddleOCR
+except ImportError as e:  # pragma: no cover - third-party import
+    logger.error("PaddleOCR действительно не установлена: %s", e)
+    raise
+except Exception as e:  # pragma: no cover - third-party import
+    logger.error("Ошибка при загрузке PaddleOCR: %s", e, exc_info=True)
+    raise
 
 
 FIELD_ALIASES: Dict[str, Sequence[str]] = {
